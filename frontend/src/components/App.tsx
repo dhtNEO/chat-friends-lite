@@ -90,6 +90,7 @@ export const App: Component = () => {
   const [focusedStreamId, setFocusedStreamId] = createSignal<string | null>(
     null,
   );
+  const [pipStreamId, setPipStreamId] = createSignal<string | null>(null);
   const [isPageHidden, setIsPageHidden] = createSignal(false);
 
   // Chat
@@ -101,6 +102,7 @@ export const App: Component = () => {
   let chatEndRef: HTMLDivElement | undefined;
   let fileInputRef: HTMLInputElement | undefined;
   const videoRefsMap = new Map<string, HTMLVideoElement>();
+  const canvasCleanupMap = new Map<string, () => void>();
   const mockStreamsMap = new Map<
     string,
     { stream: MediaStream; cleanup: () => void }
@@ -113,6 +115,7 @@ export const App: Component = () => {
   let room: Room | null = null;
   let wsCloser: { close: () => void } | null = null;
   let localScreenStream: MediaStream | null = null;
+  let localPreviewStream: MediaStream | null = null;
   let speakingInterval: number | null = null;
   let micMutedBeforeDeafen = false;
 
@@ -120,13 +123,14 @@ export const App: Component = () => {
     const handleVisibilityChange = () => {
       const hidden = document.hidden;
       setIsPageHidden(hidden);
-      const localVideo = videoRefsMap.get(LOCAL_STREAM_ID);
-      if (localVideo) {
-        if (hidden) {
-          localVideo.pause();
-        } else {
-          void localVideo.play().catch(() => {});
-        }
+      // Quando o usuário volta para a aba (ou fecha o seletor de janelas do sistema),
+      // garante que todos os elementos de vídeo ativos voltem a reproduzir sem tela preta
+      if (!hidden) {
+        videoRefsMap.forEach((videoEl) => {
+          if (videoEl.paused) {
+            void videoEl.play().catch(() => {});
+          }
+        });
       }
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -152,12 +156,16 @@ export const App: Component = () => {
   createEffect(() => {
     const streams = watchedStreams();
     const focused = focusedStreamId();
+    const activePip = pipStreamId();
     const hidden = isPageHidden();
     const totalCount = streams.length;
 
     for (const s of streams) {
       if (!s.publication) continue;
-      if (hidden) {
+      // Se esta live estiver em Picture-in-Picture (PiP), mantém qualidade ALTA mesmo com aba oculta
+      if (activePip === s.identity) {
+        s.publication.setVideoQuality(VideoQuality.HIGH);
+      } else if (hidden) {
         s.publication.setVideoQuality(VideoQuality.LOW);
       } else if (totalCount === 1 || focused === s.identity) {
         s.publication.setVideoQuality(VideoQuality.HIGH);
@@ -284,8 +292,9 @@ export const App: Component = () => {
       }
 
       // Instancia a sala LiveKit com controle manual de inscrição, Opus DTX/RED e Simulcast
+      // (adaptiveStream desativado pois gerenciamos VideoQuality manualmente com suporte a PiP e Mosaico)
       room = new Room({
-        adaptiveStream: true,
+        adaptiveStream: false,
         dynacast: true,
         publishDefaults: {
           dtx: true,
@@ -344,15 +353,17 @@ export const App: Component = () => {
           );
         } else if (track.kind === "video") {
           const newMediaStream = new MediaStream([track.mediaStreamTrack]);
-          setWatchedStreams((prev) =>
-            prev.map((s) =>
-              s.identity === participant.identity
-                ? { ...s, mediaStream: newMediaStream }
-                : s,
-            ),
+          // Atualiza o mediaStream sem recriar a referência do objeto em watchedStreams,
+          // preservando o elemento <video> já montado no DOM (e eventual janela PiP ativa)
+          const existingEntry = watchedStreams().find(
+            (s) => s.identity === participant.identity,
           );
+          if (existingEntry) {
+            existingEntry.mediaStream = newMediaStream;
+          }
           const targetVideo = videoRefsMap.get(participant.identity);
           if (targetVideo) {
+            targetVideo.muted = true;
             track.attach(targetVideo);
             void targetVideo.play().catch(() => {});
           }
@@ -459,6 +470,8 @@ export const App: Component = () => {
     }
     playLeaveSound();
     stopWatchingAllStreams();
+    localPreviewStream?.getTracks().forEach((t) => t.stop());
+    localPreviewStream = null;
     localScreenStream?.getTracks().forEach((t) => t.stop());
     localScreenStream = null;
     room?.disconnect();
@@ -615,24 +628,57 @@ export const App: Component = () => {
   const startScreenShare = async (preset: "720p" | "1080p") => {
     setScreenQualityModal(false);
 
-    const constraints: DisplayMediaStreamOptions = {
-      video:
-        preset === "720p"
-          ? { width: 1280, height: 720, frameRate: 30 }
-          : { width: 1920, height: 1080, frameRate: 60 },
-      audio: true,
-    };
+    const videoConstraints =
+      preset === "720p"
+        ? { width: 1280, height: 720, frameRate: 30 }
+        : { width: 1920, height: 1080, frameRate: 60 };
 
+    let stream: MediaStream;
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
-      const videoTrack = stream.getVideoTracks()[0];
-      const audioTrack = stream.getAudioTracks()[0];
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: videoConstraints,
+        audio: true,
+      });
+    } catch (err: any) {
+      // Caso o sistema/navegador não suporte captura de áudio de tela mas o usuário não tenha cancelado, tenta apenas vídeo
+      if (err?.name === "NotAllowedError" || err?.name === "AbortError") {
+        return;
+      }
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: videoConstraints,
+          audio: false,
+        });
+      } catch {
+        return;
+      }
+    }
 
-      videoTrack.contentHint = preset === "720p" ? "detail" : "motion";
-      localScreenStream = stream;
+    const videoTrack = stream.getVideoTracks()[0];
+    const audioTrack = stream.getAudioTracks()[0];
+    if (!videoTrack) return;
 
-      if (room) {
-        await room.localParticipant.publishTrack(videoTrack, {
+    videoTrack.enabled = true;
+    videoTrack.contentHint = preset === "720p" ? "detail" : "motion";
+    localScreenStream = stream;
+
+    // Cria um MediaStream contendo apenas a track de vídeo original (sem track de áudio no elemento <video>)
+    // para garantir autoplay imediato sem bloqueio de política de mídia e sem bug de clone() no WebKit/macOS
+    localPreviewStream = new MediaStream([videoTrack]);
+
+    setIsScreenSharing(true);
+    playStreamStart();
+
+    // Abre imediatamente o preview da própria transmissão
+    watchOwnStream();
+
+    videoTrack.addEventListener("ended", () => {
+      void stopScreenShare();
+    });
+
+    if (room) {
+      try {
+        const videoPub = await room.localParticipant.publishTrack(videoTrack, {
           source: Track.Source.ScreenShare,
           simulcast: true,
           screenShareEncoding:
@@ -641,25 +687,31 @@ export const App: Component = () => {
               : { maxBitrate: 3_500_000, maxFramerate: 60 },
         });
 
+        const localVideoEl = videoRefsMap.get(LOCAL_STREAM_ID);
+        if (localVideoEl && videoPub?.videoTrack) {
+          localVideoEl.muted = true;
+          videoPub.videoTrack.attach(localVideoEl);
+        }
+
         if (audioTrack) {
           await room.localParticipant.publishTrack(audioTrack, {
             source: Track.Source.ScreenShareAudio,
             dtx: true,
           });
         }
+      } catch (pubErr) {
+        console.error("Erro ao publicar transmissão no LiveKit:", pubErr);
       }
+    }
 
-      setIsScreenSharing(true);
-      playStreamStart();
-
-      // Abre automaticamente o preview da própria transmissão para o usuário conferir se está tudo certo
-      watchOwnStream();
-
-      videoTrack.addEventListener("ended", () => {
-        void stopScreenShare();
-      });
-    } catch {
-      // Usuário cancelou a seleção de tela
+    // Garante que o elemento <video> do preview local esteja reproduzindo após a conclusão da negociação
+    const localVideoEl = videoRefsMap.get(LOCAL_STREAM_ID);
+    if (localVideoEl && localPreviewStream) {
+      if (!localVideoEl.srcObject) {
+        localVideoEl.srcObject = localPreviewStream;
+      }
+      localVideoEl.muted = true;
+      void localVideoEl.play().catch(() => {});
     }
   };
 
@@ -668,6 +720,7 @@ export const App: Component = () => {
 
     stopWatchingStream(LOCAL_STREAM_ID);
 
+    localPreviewStream = null;
     if (localScreenStream) {
       localScreenStream.getTracks().forEach((t) => t.stop());
       localScreenStream = null;
@@ -818,7 +871,8 @@ export const App: Component = () => {
 
   // Assistir a própria transmissão local
   const watchOwnStream = () => {
-    if (!localScreenStream) return;
+    const preview = localPreviewStream || localScreenStream;
+    if (!preview) return;
     if (isStreamWatched(LOCAL_STREAM_ID)) return;
 
     const myName = currentUser()?.display_name || "Você";
@@ -828,7 +882,7 @@ export const App: Component = () => {
       displayName: `${myName} (Sua Tela)`,
       avatarColor: myColor,
       isLocal: true,
-      mediaStream: localScreenStream,
+      mediaStream: preview,
     };
 
     setWatchedStreams((prev) => [...prev, ownEntry]);
@@ -927,8 +981,17 @@ export const App: Component = () => {
       }
     }
 
+    const stopCanvas = canvasCleanupMap.get(identity);
+    if (stopCanvas) {
+      stopCanvas();
+      canvasCleanupMap.delete(identity);
+    }
+
     const videoEl = videoRefsMap.get(identity);
     if (videoEl) {
+      if (document.pictureInPictureElement === videoEl) {
+        void document.exitPictureInPicture().catch(() => {});
+      }
       if (target?.publication?.track) {
         target.publication.track.detach(videoEl);
       }
@@ -940,6 +1003,9 @@ export const App: Component = () => {
     if (focusedStreamId() === identity) {
       setFocusedStreamId(null);
     }
+    if (pipStreamId() === identity) {
+      setPipStreamId(null);
+    }
   };
 
   // Sair de todas as transmissões simultaneamente
@@ -949,6 +1015,7 @@ export const App: Component = () => {
       stopWatchingStream(id);
     }
     setFocusedStreamId(null);
+    setPipStreamId(null);
   };
 
   // Assistir todas as transmissões disponíveis na sala de uma vez
@@ -971,34 +1038,263 @@ export const App: Component = () => {
     if (!el) return;
     videoRefsMap.set(streamItem.identity, el);
     el.muted = true; // O áudio remoto passa pelo AudioEngine com ganho individual, e o local é mudo para evitar eco
+    el.defaultMuted = true;
+    el.playsInline = true;
 
-    if (streamItem.publication?.track) {
-      streamItem.publication.track.attach(el);
-    } else if (streamItem.mediaStream && el.srcObject !== streamItem.mediaStream) {
-      el.srcObject = streamItem.mediaStream;
-    }
-    void el.play().catch(() => {});
+    const onEnterPiP = () => {
+      setPipStreamId(streamItem.identity);
+      if (el.paused) {
+        void el.play().catch(() => {});
+      }
+    };
+    const onLeavePiP = () => {
+      if (pipStreamId() === streamItem.identity) {
+        setPipStreamId(null);
+      }
+      // Ao fechar o PiP, os navegadores pausam o vídeo por padrão; retomamos imediatamente
+      setTimeout(() => {
+        el.muted = true;
+        void el.play().catch(() => {});
+      }, 50);
+    };
+
+    const onFullscreenChange = () => {
+      if (el.paused) {
+        el.muted = true;
+        void el.play().catch(() => {});
+      }
+    };
+
+    const onWebkitPresentationModeChanged = () => {
+      const mode = (
+        el as HTMLVideoElement & { webkitpresentationmode?: string }
+      ).webkitpresentationmode;
+      if (mode === "picture-in-picture") {
+        setPipStreamId(streamItem.identity);
+        if (el.paused) {
+          el.muted = true;
+          void el.play().catch(() => {});
+        }
+      } else {
+        if (pipStreamId() === streamItem.identity) {
+          setPipStreamId(null);
+        }
+        setTimeout(() => {
+          el.muted = true;
+          void el.play().catch(() => {});
+        }, 50);
+      }
+    };
+
+    el.addEventListener("enterpictureinpicture", onEnterPiP);
+    el.addEventListener("leavepictureinpicture", onLeavePiP);
+    el.addEventListener("fullscreenchange", onFullscreenChange);
+    el.addEventListener("webkitfullscreenchange", onFullscreenChange);
+    el.addEventListener(
+      "webkitpresentationmodechanged",
+      onWebkitPresentationModeChanged,
+    );
+
+    const attachAndPlay = () => {
+      // No SolidJS, o callback ref executa antes de o elemento ser inserido no DOM.
+      // Aguardamos o próximo frame se el.isConnected ainda for false para evitar aborto de play() e tela preta.
+      if (!el.isConnected) {
+        requestAnimationFrame(attachAndPlay);
+        return;
+      }
+      el.muted = true;
+      el.defaultMuted = true;
+      el.playsInline = true;
+
+      const targetStream = streamItem.isLocal
+        ? localPreviewStream || streamItem.mediaStream
+        : streamItem.mediaStream;
+
+      const localPub = streamItem.isLocal
+        ? room?.localParticipant.getTrackPublication(Track.Source.ScreenShare)
+        : undefined;
+
+      if (streamItem.publication?.track) {
+        streamItem.publication.track.attach(el);
+      } else if (localPub?.videoTrack) {
+        localPub.videoTrack.attach(el);
+      } else if (targetStream && el.srcObject !== targetStream) {
+        el.srcObject = targetStream;
+      }
+
+      setTimeout(() => {
+        if (!el.isConnected) return;
+        el.muted = true;
+        void el.play().catch(() => {});
+      }, 0);
+    };
+
+    attachAndPlay();
+  };
+
+  // Espelha os quadros decodificados do <video> em um <canvas> inline dentro de .video-wrapper.
+  // Isso elimina definitivamente o bug de tela preta da camada de hardware inline do Safari/macOS
+  // (e mantém o preview visível na tela inicial mesmo durante ou após PiP / Tela Cheia).
+  const bindStreamCanvasElement = (
+    streamItem: WatchedStream,
+    canvasEl: HTMLCanvasElement | undefined,
+  ) => {
+    if (!canvasEl) return;
+
+    const prevStop = canvasCleanupMap.get(streamItem.identity);
+    if (prevStop) prevStop();
+
+    const ctx = canvasEl.getContext("2d", { alpha: false });
+    let rafId = 0;
+    let active = true;
+    let lastDrawMs = 0;
+
+    const renderLoop = (now: number) => {
+      if (!active) return;
+
+      const videoEl = videoRefsMap.get(streamItem.identity) as
+        | (HTMLVideoElement & {
+            webkitpresentationmode?: string;
+            webkitDisplayingFullscreen?: boolean;
+          })
+        | undefined;
+
+      if (videoEl && !document.hidden) {
+        const isInPiP =
+          pipStreamId() === streamItem.identity ||
+          document.pictureInPictureElement === videoEl ||
+          videoEl.webkitpresentationmode === "picture-in-picture";
+
+        const isAnyFullscreen =
+          Boolean(document.fullscreenElement) ||
+          Boolean(
+            (document as Document & { webkitFullscreenElement?: Element })
+              .webkitFullscreenElement,
+          ) ||
+          Boolean(videoEl.webkitDisplayingFullscreen);
+
+        // Economia de GPU/CPU: pausa o espelhamento no <canvas> da tela inicial
+        // enquanto o vídeo estiver em PiP ou em Tela Cheia, evitando dupla renderização.
+        if (isInPiP || isAnyFullscreen) {
+          if (canvasEl.style.opacity !== "0") {
+            canvasEl.style.opacity = "0";
+          }
+          rafId = requestAnimationFrame(renderLoop);
+          return;
+        }
+
+        if (videoEl.paused && videoEl.srcObject) {
+          videoEl.muted = true;
+          void videoEl.play().catch(() => {});
+        }
+
+        if (
+          ctx &&
+          videoEl.readyState >= 2 &&
+          videoEl.videoWidth > 0 &&
+          videoEl.videoHeight > 0 &&
+          now - lastDrawMs >= 30
+        ) {
+          lastDrawMs = now;
+          if (
+            canvasEl.width !== videoEl.videoWidth ||
+            canvasEl.height !== videoEl.videoHeight
+          ) {
+            canvasEl.width = videoEl.videoWidth;
+            canvasEl.height = videoEl.videoHeight;
+          }
+          try {
+            ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
+            if (canvasEl.style.opacity !== "1") {
+              canvasEl.style.opacity = "1";
+            }
+          } catch {
+            // Ignora falha transitória de frame
+          }
+        }
+      }
+
+      rafId = requestAnimationFrame(renderLoop);
+    };
+
+    rafId = requestAnimationFrame(renderLoop);
+    canvasCleanupMap.set(streamItem.identity, () => {
+      active = false;
+      cancelAnimationFrame(rafId);
+    });
   };
 
   const handleFullscreen = (identity: string) => {
-    const el = videoRefsMap.get(identity);
-    if (el?.requestFullscreen) {
+    const el = videoRefsMap.get(identity) as
+      | (HTMLVideoElement & {
+          webkitRequestFullscreen?: () => Promise<void> | void;
+          webkitEnterFullscreen?: () => void;
+        })
+      | undefined;
+    if (!el) return;
+    if (el.requestFullscreen) {
       void el.requestFullscreen();
+    } else if (el.webkitRequestFullscreen) {
+      void el.webkitRequestFullscreen();
+    } else if (el.webkitEnterFullscreen) {
+      el.webkitEnterFullscreen();
     }
   };
 
   const handlePictureInPicture = async (identity: string) => {
-    const el = videoRefsMap.get(identity);
-    if (el && document.pictureInPictureEnabled) {
-      try {
+    const el = videoRefsMap.get(identity) as
+      | (HTMLVideoElement & {
+          webkitSupportsPresentationMode?: (mode: string) => boolean;
+          webkitpresentationmode?: string;
+          webkitSetPresentationMode?: (mode: string) => void;
+        })
+      | undefined;
+    if (!el) return;
+
+    try {
+      // Garante que o vídeo esteja reproduzindo antes de solicitar PiP
+      el.muted = true;
+      if (el.paused) {
+        await el.play().catch(() => {});
+      }
+
+      // Se os metadados do vídeo ainda não tiverem carregado (readyState === 0), aguarda até 1.5s
+      if (el.readyState < 1) {
+        await new Promise<void>((resolve) => {
+          const timeout = setTimeout(resolve, 1500);
+          el.addEventListener(
+            "loadedmetadata",
+            () => {
+              clearTimeout(timeout);
+              resolve();
+            },
+            { once: true },
+          );
+        });
+      }
+
+      if (document.pictureInPictureEnabled && el.requestPictureInPicture) {
         if (document.pictureInPictureElement === el) {
           await document.exitPictureInPicture();
+          setPipStreamId(null);
         } else {
           await el.requestPictureInPicture();
+          setPipStreamId(identity);
         }
-      } catch {
-        // PiP não suportado neste navegador
+      } else if (
+        typeof el.webkitSupportsPresentationMode === "function" &&
+        el.webkitSupportsPresentationMode("picture-in-picture") &&
+        typeof el.webkitSetPresentationMode === "function"
+      ) {
+        const nextMode =
+          el.webkitpresentationmode === "picture-in-picture"
+            ? "inline"
+            : "picture-in-picture";
+        el.webkitSetPresentationMode(nextMode);
+        setPipStreamId(nextMode === "picture-in-picture" ? identity : null);
       }
+    } catch (err) {
+      console.warn("Não foi possível ativar Picture-in-Picture:", err);
     }
   };
 
@@ -2157,13 +2453,19 @@ export const App: Component = () => {
 
                           <button
                             type="button"
-                            class="stream-btn pip"
+                            class={`stream-btn pip ${
+                              pipStreamId() === streamItem.identity
+                                ? "active"
+                                : ""
+                            }`}
                             onClick={() =>
                               void handlePictureInPicture(streamItem.identity)
                             }
-                            title="Janela Flutuante (PiP)"
+                            title="Janela Flutuante (Picture-in-Picture)"
                           >
-                            PiP
+                            {pipStreamId() === streamItem.identity
+                              ? "Sair do PiP"
+                              : "PiP"}
                           </button>
                           <button
                             type="button"
@@ -2198,11 +2500,50 @@ export const App: Component = () => {
                       >
                         <video
                           ref={(el) => bindStreamVideoElement(streamItem, el)}
-                          autoplay
                           playsinline
                           muted
+                          onLoadedMetadata={(e) => {
+                            e.currentTarget.muted = true;
+                            void e.currentTarget.play().catch(() => {});
+                          }}
+                          onLoadedData={(e) => {
+                            e.currentTarget.muted = true;
+                            if (e.currentTarget.paused) {
+                              void e.currentTarget.play().catch(() => {});
+                            }
+                          }}
+                          onCanPlay={(e) => {
+                            if (e.currentTarget.paused) {
+                              void e.currentTarget.play().catch(() => {});
+                            }
+                          }}
                           class="stream-video-element"
                         />
+                        <canvas
+                          ref={(canvasEl) =>
+                            bindStreamCanvasElement(streamItem, canvasEl)
+                          }
+                          class="stream-video-canvas"
+                        />
+                        <Show when={pipStreamId() === streamItem.identity}>
+                          <div class="pip-active-placeholder">
+                            <span class="pip-placeholder-title">
+                              Reproduzindo em Picture-in-Picture
+                            </span>
+                            <span class="pip-placeholder-sub">
+                              Preview na tela inicial pausado para economizar GPU
+                            </span>
+                            <button
+                              type="button"
+                              class="stream-btn"
+                              onClick={() =>
+                                void handlePictureInPicture(streamItem.identity)
+                              }
+                            >
+                              Voltar para a Tela Inicial
+                            </button>
+                          </div>
+                        </Show>
                       </div>
                     </div>
                   );

@@ -24,6 +24,7 @@ net.core.rmem_max=26214400
 net.core.wmem_max=26214400
 net.core.rmem_default=4194304
 net.core.wmem_default=4194304
+net.ipv4.ip_forward=1
 EOF
 sysctl --system || true
 
@@ -43,8 +44,15 @@ if ! command -v docker &> /dev/null; then
 
     apt-get update -y
     apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    mkdir -p /etc/docker
+    cat << 'EOF' > /etc/docker/daemon.json
+{
+  "mtu": 1460,
+  "ipv6": false
+}
+EOF
     systemctl enable docker
-    systemctl start docker
+    systemctl restart docker
     echo "==> Docker instalado com sucesso."
 fi
 

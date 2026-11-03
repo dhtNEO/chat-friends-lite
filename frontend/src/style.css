@@ -48,16 +48,19 @@ body {
 }
 
 /* APP CONTAINER */
+#root,
 .discord-app {
   display: flex;
   flex-direction: column;
   height: 100vh;
   width: 100vw;
+  overflow: hidden;
 }
 
 /* BARRA SUPERIOR */
 .top-nav {
   height: 48px;
+  flex-shrink: 0;
   background-color: var(--bg-primary);
   border-bottom: 1px solid #1f2023;
   display: flex;
@@ -130,7 +133,9 @@ body {
 /* CORPO DO APLICATIVO */
 .app-body {
   display: flex;
-  flex: 1;
+  flex: 1 1 0%;
+  height: calc(100vh - 48px);
+  min-height: 0;
   overflow: hidden;
   position: relative;
 }
@@ -547,7 +552,10 @@ body {
 
 /* PALCO CENTRAL (STAGE) */
 .center-stage {
-  flex: 1;
+  flex: 1 1 0%;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
   background-color: var(--bg-primary);
   display: flex;
   flex-direction: column;
@@ -557,6 +565,7 @@ body {
 
 /* CENTRAL DE GERENCIAMENTO DE TRANSMISSÕES (LIVE HUB BAR) */
 .live-streams-hub {
+  flex-shrink: 0;
   background: #1a1b1e;
   border-bottom: 1px solid #2b2d31;
   padding: 10px 18px;
@@ -1004,18 +1013,21 @@ body {
 
 /* PALCO MULTI-STREAM (1, 2, 3+ TRANSMISSÕES EM MOSAICO OU DESTAQUE) */
 .multi-stream-stage {
-  flex: 1;
+  flex: 1 1 0%;
+  width: 100%;
+  height: 100%;
   display: grid;
   gap: 10px;
   padding: 10px;
   background: #0b0c0e;
   overflow: hidden;
   min-height: 0;
+  min-width: 0;
 }
 
 .multi-stream-stage.layout-single {
-  grid-template-columns: 1fr;
-  grid-template-rows: 1fr;
+  display: flex;
+  flex-direction: column;
   padding: 0;
   gap: 0;
 }
@@ -1041,8 +1053,11 @@ body {
 }
 
 .stream-tile {
+  flex: 1 1 0%;
   display: flex;
   flex-direction: column;
+  width: 100%;
+  height: 100%;
   background: #000;
   border: 1px solid #232428;
   border-radius: 8px;
@@ -1057,6 +1072,7 @@ body {
 }
 
 .stream-top-bar {
+  flex-shrink: 0;
   min-height: 44px;
   background-color: #111214;
   border-bottom: 1px solid #1e1f22;
@@ -1187,21 +1203,69 @@ body {
 }
 
 .video-wrapper {
-  flex: 1;
+  flex: 1 1 0%;
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
+  width: 100%;
+  height: 100%;
   background: #000;
   overflow: hidden;
-  min-height: 0;
+  min-height: 240px;
 }
 
 .stream-video-element {
+  position: absolute;
+  inset: 0;
+  display: block;
   width: 100%;
   height: 100%;
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
+  background: #000;
+  z-index: 1;
+}
+
+.stream-video-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 2;
+}
+
+.pip-active-placeholder {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  background: #0d0e11;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+}
+
+.pip-placeholder-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-header);
+}
+
+.pip-placeholder-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
 }
 
 /* GAVETA DE CHAT DIREITA */

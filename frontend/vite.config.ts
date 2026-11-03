@@ -401,6 +401,10 @@ export default defineConfig({
             target: "ws://localhost:8080",
             ws: true,
           },
+          "/rtc": {
+            target: "ws://localhost:7880",
+            ws: true,
+          },
         }
       : undefined,
   },
