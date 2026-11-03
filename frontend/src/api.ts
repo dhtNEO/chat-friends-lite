@@ -17,6 +17,12 @@ export interface MeResponse {
   audio_preferences: AudioPreference[];
 }
 
+export interface ReactionGroup {
+  emoji: string;
+  count: number;
+  users: string[];
+}
+
 export interface ChatMessage {
   id: number;
   user_id: number;
@@ -24,6 +30,8 @@ export interface ChatMessage {
   display_name: string;
   avatar_color: string;
   content: string;
+  image_url?: string;
+  reactions?: ReactionGroup[];
   created_at: number;
 }
 
@@ -114,11 +122,27 @@ export async function getMessages(
   return request<ChatMessage[]>(`/api/messages?${params.toString()}`);
 }
 
-export async function sendMessage(content: string): Promise<ChatMessage> {
+export async function sendMessage(
+  content: string,
+  image_url?: string,
+): Promise<ChatMessage> {
   return request<ChatMessage>("/api/messages", {
     method: "POST",
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, image_url }),
   });
+}
+
+export async function toggleMessageReaction(
+  messageId: number,
+  emoji: string,
+): Promise<{ message_id: number; reactions: ReactionGroup[] }> {
+  return request<{ message_id: number; reactions: ReactionGroup[] }>(
+    `/api/messages/${messageId}/reactions`,
+    {
+      method: "POST",
+      body: JSON.stringify({ emoji }),
+    },
+  );
 }
 
 export async function getMediaToken(): Promise<MediaTokenResponse> {
@@ -154,6 +178,8 @@ export async function updateMicGain(
 export type WsMessageCallback = (data: {
   type: string;
   message?: ChatMessage;
+  message_id?: number;
+  reactions?: ReactionGroup[];
   user?: { id: number; username: string; display_name: string };
   users?: string[];
 }) => void;

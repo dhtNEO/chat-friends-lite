@@ -6,6 +6,7 @@ mod duckdns;
 mod media;
 
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{get, post, put},
     Json, Router,
 };
@@ -57,8 +58,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.duckdns_token.clone(),
     );
 
-    // Channel for real-time WebSocket chat and room events
-    let (chat_tx, _) = broadcast::channel::<String>(256);
+    // Channel for real-time WebSocket chat and room events (buffer enxuto de 64 eventos)
+    let (chat_tx, _) = broadcast::channel::<String>(64);
 
     let state = AppState {
         config: config.clone(),
@@ -76,9 +77,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/messages",
             get(chat::get_messages).post(chat::create_message),
         )
+        .route("/messages/{id}/image", get(chat::get_message_image))
+        .route("/messages/{id}/reactions", post(chat::toggle_reaction))
         .route("/media/token", post(media::generate_token))
         .route("/media/preferences", put(media::set_audio_preference))
-        .route("/media/mic-gain", put(media::set_mic_gain));
+        .route("/media/mic-gain", put(media::set_mic_gain))
+        .layer(DefaultBodyLimit::max(6 * 1024 * 1024));
 
     let index_file = ServeFile::new(format!("{}/index.html", config.static_dir));
     let serve_dir = ServeDir::new(&config.static_dir).fallback(index_file);

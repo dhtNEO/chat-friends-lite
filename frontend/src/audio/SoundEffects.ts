@@ -1,37 +1,43 @@
-let audioCtx: AudioContext | null = null;
+import { audioEngine } from "./AudioEngine";
 
-function getAudioContext(): AudioContext {
-  if (!audioCtx) {
-    const AudioContextClass =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext: typeof AudioContext })
-        .webkitAudioContext;
-    audioCtx = new AudioContextClass();
+const bufferCache = new Map<string, AudioBuffer>();
+
+async function playCachedSound(url: string, fallbackFreqs: number[]): Promise<void> {
+  try {
+    const ctx = audioEngine.getContext();
+    let buffer = bufferCache.get(url);
+
+    if (!buffer) {
+      const resp = await fetch(url);
+      if (resp.ok) {
+        const arrayBuf = await resp.arrayBuffer();
+        buffer = await ctx.decodeAudioData(arrayBuf);
+        bufferCache.set(url, buffer);
+      }
+    }
+
+    if (buffer) {
+      const source = ctx.createBufferSource();
+      const gain = ctx.createGain();
+      source.buffer = buffer;
+      gain.gain.setValueAtTime(0.55, ctx.currentTime);
+      source.connect(gain);
+      gain.connect(audioEngine.getMasterGain());
+      source.start(0);
+      return;
+    }
+  } catch {
+    // Fallback para síntese leve se o arquivo não existir ou falhar
   }
-  if (audioCtx.state === "suspended") {
-    void audioCtx.resume();
-  }
-  return audioCtx;
+  playToneSequence(fallbackFreqs, 0.18, "sine", 0.14);
 }
 
 export function playJoinSound(): void {
-  try {
-    const audio = new Audio("/sounds/entrar.mp3");
-    audio.volume = 0.55;
-    void audio.play().catch(() => {});
-  } catch {
-    // Falha silenciosa em navegadores com restrição de autoplay
-  }
+  void playCachedSound("/sounds/entrar.mp3", [440, 587.33]);
 }
 
 export function playLeaveSound(): void {
-  try {
-    const audio = new Audio("/sounds/sair.mp3");
-    audio.volume = 0.55;
-    void audio.play().catch(() => {});
-  } catch {
-    // Falha silenciosa
-  }
+  void playCachedSound("/sounds/sair.mp3", [523.25, 349.23]);
 }
 
 function playToneSequence(
@@ -41,7 +47,7 @@ function playToneSequence(
   volume = 0.15,
 ): void {
   try {
-    const ctx = getAudioContext();
+    const ctx = audioEngine.getContext();
     const now = ctx.currentTime;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -58,6 +64,7 @@ function playToneSequence(
     gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
 
     osc.connect(gain);
+    // Conecta diretamente no ctx.destination para que os bipes de mute/deafen ainda sejam ouvidos pelo próprio usuário ao desativar o áudio
     gain.connect(ctx.destination);
 
     osc.start(now);

@@ -18,6 +18,15 @@ if [ ! -f /swapfile ]; then
     echo "==> Swap de 2 GB configurado com sucesso."
 fi
 
+# 1.1. Otimizar buffers UDP do Kernel Linux para tráfego WebRTC / LiveKit de baixa latência (60 FPS)
+cat <<EOF > /etc/sysctl.d/99-webrtc-udp.conf
+net.core.rmem_max=26214400
+net.core.wmem_max=26214400
+net.core.rmem_default=4194304
+net.core.wmem_default=4194304
+EOF
+sysctl --system || true
+
 # 2. Instalação do Docker e Docker Compose Plugin
 if ! command -v docker &> /dev/null; then
     echo "==> Instalando Docker CE..."

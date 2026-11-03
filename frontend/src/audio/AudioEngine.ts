@@ -11,6 +11,14 @@ export class AudioEngine {
   private ctx: AudioContext;
   private masterGain: GainNode;
   private deafened = false;
+  private outputVolume =
+    typeof localStorage !== "undefined"
+      ? Number(localStorage.getItem("cf_audio_output_volume") ?? "100")
+      : 100;
+  private outputDeviceId =
+    typeof localStorage !== "undefined"
+      ? localStorage.getItem("cf_audio_output_device") || "default"
+      : "default";
   private trackNodes = new Map<string, TrackNodeGroup>();
   private userPreferences = new Map<string, number>(); // key: `${username}:${streamType}` -> volume (0..200)
   private debounceTimers = new Map<string, number>();
@@ -20,10 +28,108 @@ export class AudioEngine {
       window.AudioContext ||
       (window as unknown as { webkitAudioContext: typeof AudioContext })
         .webkitAudioContext;
-    this.ctx = new AudioContextClass();
+    this.ctx = new AudioContextClass({ latencyHint: "interactive" });
     this.masterGain = this.ctx.createGain();
-    this.masterGain.gain.setValueAtTime(1.0, this.ctx.currentTime);
+    this.masterGain.gain.setValueAtTime(
+      this.calculateGain(this.outputVolume),
+      this.ctx.currentTime,
+    );
     this.masterGain.connect(this.ctx.destination);
+    if (this.outputDeviceId && this.outputDeviceId !== "default") {
+      void this.applySinkId(this.outputDeviceId);
+    }
+  }
+
+  public getContext(): AudioContext {
+    this.resumeContext();
+    return this.ctx;
+  }
+
+  public getMasterGain(): GainNode {
+    return this.masterGain;
+  }
+
+  public getOutputVolume(): number {
+    return this.outputVolume;
+  }
+
+  public setOutputVolume(sliderValue: number): void {
+    const clamped = Math.max(0, Math.min(200, Math.round(sliderValue)));
+    this.outputVolume = clamped;
+    try {
+      localStorage.setItem("cf_audio_output_volume", String(clamped));
+    } catch {
+      // ignore storage errors
+    }
+    this.resumeContext();
+    if (!this.deafened) {
+      this.masterGain.gain.setTargetAtTime(
+        this.calculateGain(this.outputVolume),
+        this.ctx.currentTime,
+        0.015,
+      );
+    }
+  }
+
+  public playTestTone(): void {
+    this.resumeContext();
+    const now = this.ctx.currentTime;
+    const notes = [523.25, 659.25, 783.99]; // C5, E5, G5
+    notes.forEach((freq, idx) => {
+      const osc = this.ctx.createOscillator();
+      const env = this.ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, now + idx * 0.09);
+
+      env.gain.setValueAtTime(0.0001, now + idx * 0.09);
+      env.gain.exponentialRampToValueAtTime(0.18, now + idx * 0.09 + 0.02);
+      env.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.09 + 0.24);
+
+      osc.connect(env);
+      env.connect(this.masterGain);
+      osc.start(now + idx * 0.09);
+      osc.stop(now + idx * 0.09 + 0.25);
+    });
+  }
+
+  public getOutputDevice(): string {
+    return this.outputDeviceId;
+  }
+
+  public async setOutputDevice(deviceId: string): Promise<void> {
+    this.outputDeviceId = deviceId || "default";
+    try {
+      localStorage.setItem("cf_audio_output_device", this.outputDeviceId);
+    } catch {
+      // ignore storage errors
+    }
+    await this.applySinkId(this.outputDeviceId);
+  }
+
+  private async applySinkId(deviceId: string): Promise<void> {
+    const sinkId = deviceId === "default" ? "" : deviceId;
+    const ctxWithSink = this.ctx as AudioContext & {
+      setSinkId?: (id: string) => Promise<void>;
+    };
+    if (typeof ctxWithSink.setSinkId === "function") {
+      try {
+        await ctxWithSink.setSinkId(sinkId);
+      } catch {
+        // Dispositivo não disponível ou não suportado
+      }
+    }
+    for (const group of this.trackNodes.values()) {
+      const elWithSink = group.audioEl as HTMLAudioElement & {
+        setSinkId?: (id: string) => Promise<void>;
+      };
+      if (typeof elWithSink.setSinkId === "function") {
+        try {
+          await elWithSink.setSinkId(sinkId);
+        } catch {
+          // ignore
+        }
+      }
+    }
   }
 
   public initPreferences(prefs: AudioPreference[]): void {
@@ -44,7 +150,7 @@ export class AudioEngine {
     this.deafened = deafened;
     this.resumeContext();
     this.masterGain.gain.setTargetAtTime(
-      deafened ? 0 : 1,
+      deafened ? 0 : this.calculateGain(this.outputVolume),
       this.ctx.currentTime,
       0.015,
     );

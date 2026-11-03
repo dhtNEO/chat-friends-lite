@@ -10,6 +10,12 @@ interface User {
   mic_gain: number;
 }
 
+interface ReactionGroup {
+  emoji: string;
+  count: number;
+  users: string[];
+}
+
 interface ChatMessage {
   id: number;
   user_id: number;
@@ -17,6 +23,8 @@ interface ChatMessage {
   display_name: string;
   avatar_color: string;
   content: string;
+  image_url?: string;
+  reactions: ReactionGroup[];
   created_at: number;
 }
 
@@ -29,9 +37,10 @@ function devBackendPlugin(): Plugin {
       id: 1,
       user_id: 2,
       username: "galecalol",
-      display_name: "Gale Calol",
+      display_name: "Galeca",
       avatar_color: "#57F287",
       content: "Salve galera! Bora pro canal de voz?",
+      reactions: [{ emoji: "🔥", count: 2, users: ["penumbra", "vgeralt"] }],
       created_at: Math.floor(Date.now() / 1000) - 300,
     },
     {
@@ -40,7 +49,8 @@ function devBackendPlugin(): Plugin {
       username: "penumbra",
       display_name: "Penumbra",
       avatar_color: "#EB459E",
-      content: "Opa, to entrando agora!",
+      content: "Opa, to entrando agora! Confiram o link: https://github.com",
+      reactions: [{ emoji: "👍", count: 1, users: ["galecalol"] }],
       created_at: Math.floor(Date.now() / 1000) - 180,
     },
     {
@@ -50,11 +60,13 @@ function devBackendPlugin(): Plugin {
       display_name: "Geralt",
       avatar_color: "#FEE75C",
       content: "Vou abrir uma live da gameplay pra vocês assistirem.",
+      reactions: [],
       created_at: Math.floor(Date.now() / 1000) - 60,
     },
   ];
 
   let nextMsgId = 4;
+  const rawImages = new Map<number, string>();
   const audioPrefs = new Map<string, number>();
   const wsClients = new Set<WebSocket>();
 
@@ -220,7 +232,11 @@ function devBackendPlugin(): Plugin {
         if (method === "POST" && path === "/api/messages") {
           const body = await parseBody();
           const content = (body.content || "").trim();
-          if (!content) {
+          const image_url =
+            typeof body.image_url === "string" && body.image_url.trim()
+              ? body.image_url.trim()
+              : undefined;
+          if (!content && !image_url) {
             return json({ error: "Mensagem vazia" }, 400);
           }
           const user = currentUser || {
@@ -230,13 +246,26 @@ function devBackendPlugin(): Plugin {
             avatar_color: "#5865F2",
             mic_gain: 100,
           };
+          const msgId = nextMsgId++;
+          let publicImageUrl: string | undefined;
+          if (image_url) {
+            if (image_url.startsWith("data:")) {
+              rawImages.set(msgId, image_url);
+              publicImageUrl = `/api/messages/${msgId}/image`;
+            } else {
+              publicImageUrl = image_url;
+            }
+          }
+
           const newMsg: ChatMessage = {
-            id: nextMsgId++,
+            id: msgId,
             user_id: user.id,
             username: user.username,
             display_name: user.display_name,
             avatar_color: user.avatar_color,
             content,
+            image_url: publicImageUrl,
+            reactions: [],
             created_at: Math.floor(Date.now() / 1000),
           };
           messages.push(newMsg);
@@ -253,6 +282,66 @@ function devBackendPlugin(): Plugin {
           }
 
           return json(newMsg, 201);
+        }
+
+        // GET /api/messages/:id/image
+        const imageMatch = path.match(/^\/api\/messages\/(\d+)\/image$/);
+        if (method === "GET" && imageMatch) {
+          const msgId = Number(imageMatch[1]);
+          const dataUri = rawImages.get(msgId);
+          if (!dataUri || !dataUri.startsWith("data:")) {
+            return json({ error: "Imagem não encontrada" }, 404);
+          }
+          const [metaPart, b64Data] = dataUri.slice(5).split(";base64,");
+          const buf = Buffer.from(b64Data || "", "base64");
+          res.writeHead(200, {
+            "Content-Type": metaPart || "image/webp",
+            "Cache-Control": "public, max-age=31536000, immutable",
+          });
+          res.end(buf);
+          return;
+        }
+
+        // POST /api/messages/:id/reactions
+        const reactionMatch = path.match(/^\/api\/messages\/(\d+)\/reactions$/);
+        if (method === "POST" && reactionMatch) {
+          const msgId = Number(reactionMatch[1]);
+          const body = await parseBody();
+          const emoji = (body.emoji || "").trim();
+          const msg = messages.find((m) => m.id === msgId);
+          if (!msg || !emoji) {
+            return json({ error: "Mensagem ou emoji inválido" }, 400);
+          }
+
+          const uname = currentUser?.username || "voce";
+          let group = msg.reactions.find((r) => r.emoji === emoji);
+          if (group) {
+            if (group.users.includes(uname)) {
+              group.users = group.users.filter((u) => u !== uname);
+              group.count = group.users.length;
+              if (group.count === 0) {
+                msg.reactions = msg.reactions.filter((r) => r.emoji !== emoji);
+              }
+            } else {
+              group.users.push(uname);
+              group.count = group.users.length;
+            }
+          } else {
+            msg.reactions.push({ emoji, count: 1, users: [uname] });
+          }
+
+          const eventStr = JSON.stringify({
+            type: "message_reactions",
+            message_id: msgId,
+            reactions: msg.reactions,
+          });
+          for (const ws of wsClients) {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(eventStr);
+            }
+          }
+
+          return json({ message_id: msgId, reactions: msg.reactions });
         }
 
         // POST /api/media/token
