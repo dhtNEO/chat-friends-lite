@@ -5,6 +5,7 @@ export class MicrophoneProcessor {
   private limiterNode: DynamicsCompressorNode;
   private analyserNode: AnalyserNode;
   private destinationNode: MediaStreamAudioDestinationNode;
+  private keepAliveGainNode: GainNode;
   private currentStream: MediaStream | null = null;
   private dataArray: Uint8Array<ArrayBuffer>;
 
@@ -36,15 +37,37 @@ export class MicrophoneProcessor {
     // 4. DestinationNode que fornece a track processada para transmissão
     this.destinationNode = this.ctx.createMediaStreamDestination();
 
+    // 5. Nó silencioso conectado ao destination principal para manter o clock
+    // do Web Audio ativo no Safari/WebKit e Firefox
+    this.keepAliveGainNode = this.ctx.createGain();
+    this.keepAliveGainNode.gain.setValueAtTime(0, this.ctx.currentTime);
+
     // Conexões da pipeline de áudio
     this.gainNode.connect(this.limiterNode);
     this.limiterNode.connect(this.analyserNode);
     this.analyserNode.connect(this.destinationNode);
+    this.analyserNode.connect(this.keepAliveGainNode);
+    this.keepAliveGainNode.connect(this.ctx.destination);
+
+    // No Safari, o getUserMedia pode colocar o AudioContext em estado "interrupted" ou "suspended"
+    this.ctx.onstatechange = () => {
+      const state = this.ctx.state as string;
+      if (state === "suspended" || state === "interrupted") {
+        void this.ctx.resume().catch(() => {});
+      }
+    };
+  }
+
+  public resume(): void {
+    const state = this.ctx.state as string;
+    if (state !== "running" && state !== "closed") {
+      void this.ctx.resume().catch(() => {});
+    }
   }
 
   public async setSourceStream(stream: MediaStream): Promise<MediaStreamTrack> {
-    if (this.ctx.state === "suspended") {
-      await this.ctx.resume();
+    if ((this.ctx.state as string) !== "running") {
+      await this.ctx.resume().catch(() => {});
     }
 
     if (this.sourceNode) {
@@ -55,7 +78,9 @@ export class MicrophoneProcessor {
     this.sourceNode = this.ctx.createMediaStreamSource(stream);
     this.sourceNode.connect(this.gainNode);
 
-    return this.destinationNode.stream.getAudioTracks()[0];
+    const processedTrack = this.destinationNode.stream.getAudioTracks()[0];
+    processedTrack.enabled = true;
+    return processedTrack;
   }
 
   public setGainPercent(percent: number): void {
@@ -95,6 +120,7 @@ export class MicrophoneProcessor {
   }
 
   public cleanup(): void {
+    this.ctx.onstatechange = null;
     if (this.sourceNode) {
       this.sourceNode.disconnect();
       this.sourceNode = null;
@@ -103,8 +129,8 @@ export class MicrophoneProcessor {
       this.currentStream.getTracks().forEach((track) => track.stop());
       this.currentStream = null;
     }
-    if (this.ctx.state !== "closed") {
-      void this.ctx.close();
+    if ((this.ctx.state as string) !== "closed") {
+      void this.ctx.close().catch(() => {});
     }
   }
 }

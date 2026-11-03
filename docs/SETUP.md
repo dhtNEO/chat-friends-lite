@@ -47,7 +47,7 @@ A referência de variáveis está no arquivo [`.env.example`](../.env.example). 
 | `SERVER_INVITE_CODE` | **Sim** | — | Código de convite exigido no cadastro de novos usuários. |
 | `LIVEKIT_API_KEY` | **Sim** | — | Chave de API do servidor LiveKit (ex.: `devkey`). |
 | `LIVEKIT_API_SECRET` | **Sim** | — | Segredo HMAC-SHA256 do LiveKit (mínimo recomendado: 32 bytes). |
-| `LIVEKIT_URL` | **Sim** | — | URL WebSocket do LiveKit enviada ao cliente (ex.: `ws://localhost:7880` local ou `wss://seu-dominio.duckdns.org/rtc` em produção). |
+| `LIVEKIT_URL` | **Sim** | — | URL base WebSocket do LiveKit enviada ao cliente (ex.: `ws://localhost:7880` local ou `wss://seu-dominio.duckdns.org` em produção; o SDK cliente adiciona `/rtc` automaticamente). |
 | `DUCKDNS_DOMAIN` | Não | — | Subdomínio ou domínio DuckDNS (ex.: `amigos.duckdns.org`). Se definido junto com `DUCKDNS_TOKEN`, o backend atualiza o IP público a cada 5 minutos. |
 | `DUCKDNS_TOKEN` | Não | — | Token da conta DuckDNS (usado pelo backend para atualizar o IP e pelo Caddy para o desafio TLS DNS-01). |
 | `DOMAIN` | Prod | — | Domínio principal usado pelo Caddy e Docker Compose em produção. |

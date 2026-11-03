@@ -38,7 +38,11 @@ impl Config {
             .map_err(|_| "Missing required environment variable: LIVEKIT_API_SECRET".to_string())?;
 
         let livekit_url = env::var("LIVEKIT_URL")
-            .map_err(|_| "Missing required environment variable: LIVEKIT_URL".to_string())?;
+            .map_err(|_| "Missing required environment variable: LIVEKIT_URL".to_string())?
+            .trim()
+            .trim_end_matches('/')
+            .trim_end_matches("/rtc")
+            .to_string();
 
         let duckdns_domain = env::var("DUCKDNS_DOMAIN")
             .ok()

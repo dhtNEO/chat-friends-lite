@@ -4,10 +4,13 @@ interface TrackNodeGroup {
   source: MediaStreamAudioSourceNode;
   gain: GainNode;
   stream: MediaStream;
+  audioEl: HTMLAudioElement;
 }
 
 export class AudioEngine {
   private ctx: AudioContext;
+  private masterGain: GainNode;
+  private deafened = false;
   private trackNodes = new Map<string, TrackNodeGroup>();
   private userPreferences = new Map<string, number>(); // key: `${username}:${streamType}` -> volume (0..200)
   private debounceTimers = new Map<string, number>();
@@ -18,6 +21,9 @@ export class AudioEngine {
       (window as unknown as { webkitAudioContext: typeof AudioContext })
         .webkitAudioContext;
     this.ctx = new AudioContextClass();
+    this.masterGain = this.ctx.createGain();
+    this.masterGain.gain.setValueAtTime(1.0, this.ctx.currentTime);
+    this.masterGain.connect(this.ctx.destination);
   }
 
   public initPreferences(prefs: AudioPreference[]): void {
@@ -34,14 +40,26 @@ export class AudioEngine {
     return 100; // default 100%
   }
 
+  public setDeafened(deafened: boolean): void {
+    this.deafened = deafened;
+    this.resumeContext();
+    this.masterGain.gain.setTargetAtTime(
+      deafened ? 0 : 1,
+      this.ctx.currentTime,
+      0.015,
+    );
+  }
+
+  public isDeafened(): boolean {
+    return this.deafened;
+  }
+
   public attachRemoteTrack(
     track: MediaStreamTrack,
     username: string,
     streamType: "voice" | "screen",
   ): void {
-    if (this.ctx.state === "suspended") {
-      void this.ctx.resume();
-    }
+    this.resumeContext();
 
     const trackKey = `${username.toLowerCase()}:${streamType}:${track.id}`;
 
@@ -51,6 +69,19 @@ export class AudioEngine {
     }
 
     const stream = new MediaStream([track]);
+
+    // Workaround obrigatório para Chromium (Chrome/Edge/Brave):
+    // Uma MediaStreamTrack remota do WebRTC precisa estar anexada a um HTMLAudioElement
+    // em reprodução (mesmo mutado) para que o navegador puxe e decodifique os pacotes RTP
+    // para o Web Audio API (createMediaStreamSource).
+    const audioEl = document.createElement("audio");
+    audioEl.srcObject = stream;
+    audioEl.muted = true;
+    audioEl.volume = 0;
+    audioEl.autoplay = true;
+    audioEl.setAttribute("playsinline", "true");
+    void audioEl.play().catch(() => {});
+
     const source = this.ctx.createMediaStreamSource(stream);
     const gain = this.ctx.createGain();
 
@@ -59,20 +90,35 @@ export class AudioEngine {
     gain.gain.setValueAtTime(gainVal, this.ctx.currentTime);
 
     source.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(this.masterGain);
 
-    this.trackNodes.set(trackKey, { source, gain, stream });
+    this.trackNodes.set(trackKey, { source, gain, stream, audioEl });
 
     track.addEventListener("ended", () => {
       this.detachTrack(trackKey);
     });
   }
 
+  public detachRemoteTrack(
+    track: MediaStreamTrack,
+    username: string,
+    streamType: "voice" | "screen",
+  ): void {
+    const trackKey = `${username.toLowerCase()}:${streamType}:${track.id}`;
+    this.detachTrack(trackKey);
+  }
+
   public detachTrack(trackKey: string): void {
     const group = this.trackNodes.get(trackKey);
     if (group) {
-      group.source.disconnect();
-      group.gain.disconnect();
+      try {
+        group.source.disconnect();
+        group.gain.disconnect();
+      } catch {
+        // Ignora erro se já desconectado
+      }
+      group.audioEl.pause();
+      group.audioEl.srcObject = null;
       this.trackNodes.delete(trackKey);
     }
   }
@@ -117,8 +163,8 @@ export class AudioEngine {
   }
 
   public resumeContext(): void {
-    if (this.ctx.state === "suspended") {
-      void this.ctx.resume();
+    if ((this.ctx.state as string) !== "running" && (this.ctx.state as string) !== "closed") {
+      void this.ctx.resume().catch(() => {});
     }
   }
 
@@ -126,8 +172,8 @@ export class AudioEngine {
     for (const [key] of this.trackNodes) {
       this.detachTrack(key);
     }
-    if (this.ctx.state !== "closed") {
-      void this.ctx.close();
+    if ((this.ctx.state as string) !== "closed") {
+      void this.ctx.close().catch(() => {});
     }
   }
 }

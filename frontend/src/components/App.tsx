@@ -10,10 +10,10 @@ import {
 import {
   Room,
   RoomEvent,
+  ParticipantEvent,
   Track,
-  type RemoteParticipant,
+  RemoteParticipant,
   type RemoteTrackPublication,
-  type LocalTrackPublication,
 } from "livekit-client";
 import {
   getMe,
@@ -60,6 +60,7 @@ export const App: Component = () => {
   const [inCall, setInCall] = createSignal(false);
   const [connecting, setConnecting] = createSignal(false);
   const [isMicMuted, setIsMicMuted] = createSignal(false);
+  const [isLocalSpeaking, setIsLocalSpeaking] = createSignal(false);
   const [isDeafened, setIsDeafened] = createSignal(false);
   const [isScreenSharing, setIsScreenSharing] = createSignal(false);
   const [screenQualityModal, setScreenQualityModal] = createSignal(false);
@@ -138,12 +139,16 @@ export const App: Component = () => {
     if (inCall() || connecting()) return;
     setConnecting(true);
 
+    // Importante para Safari/WebKit: instanciar e resumir os AudioContexts
+    // de forma síncrona dentro do evento de clique antes do primeiro await
+    audioEngine.resumeContext();
+    micProcessor?.cleanup();
+    micProcessor = new MicrophoneProcessor();
+    micProcessor.resume();
+    micProcessor.setGainPercent(currentUser()?.mic_gain ?? 100);
+
     try {
       const { token, url } = await getMediaToken();
-
-      // Inicializa o processador de áudio local
-      micProcessor = new MicrophoneProcessor();
-      micProcessor.setGainPercent(currentUser()?.mic_gain ?? 100);
 
       // Solicita acesso ao microfone
       const micStream = await navigator.mediaDevices.getUserMedia({
@@ -155,6 +160,7 @@ export const App: Component = () => {
       });
 
       const processedAudioTrack = await micProcessor.setSourceStream(micStream);
+      audioEngine.resumeContext();
 
       // Instancia a sala LiveKit com controle manual de inscrição
       room = new Room({
@@ -176,6 +182,7 @@ export const App: Component = () => {
           void publication.setSubscribed(false);
           updateParticipantScreenStatus(participant.identity, true, publication);
         }
+        syncParticipantState(participant);
       });
 
       room.on(RoomEvent.TrackUnpublished, (publication, participant) => {
@@ -184,6 +191,19 @@ export const App: Component = () => {
           if (activeWatchingStream()?.identity === participant.identity) {
             stopWatching();
           }
+        }
+        syncParticipantState(participant);
+      });
+
+      room.on(RoomEvent.TrackMuted, (_publication, participant) => {
+        if (participant instanceof RemoteParticipant) {
+          syncParticipantState(participant);
+        }
+      });
+
+      room.on(RoomEvent.TrackUnmuted, (_publication, participant) => {
+        if (participant instanceof RemoteParticipant) {
+          syncParticipantState(participant);
         }
       });
 
@@ -199,17 +219,27 @@ export const App: Component = () => {
         } else if (track.kind === "video" && videoEl) {
           track.attach(videoEl);
         }
+        syncParticipantState(participant);
       });
 
-      room.on(RoomEvent.TrackUnsubscribed, (track) => {
-        if (track.kind === "video" && videoEl) {
+      room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+        if (track.kind === "audio") {
+          const isScreen =
+            publication.source === Track.Source.ScreenShareAudio;
+          audioEngine.detachRemoteTrack(
+            track.mediaStreamTrack,
+            participant.identity,
+            isScreen ? "screen" : "voice",
+          );
+        } else if (track.kind === "video" && videoEl) {
           track.detach(videoEl);
         }
+        syncParticipantState(participant);
       });
 
       room.on(RoomEvent.ParticipantConnected, (participant) => {
         playJoinSound();
-        addParticipantToList(participant);
+        syncParticipantState(participant);
       });
 
       room.on(RoomEvent.ParticipantDisconnected, (participant) => {
@@ -222,10 +252,14 @@ export const App: Component = () => {
 
       room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
         const speakingSet = new Set(speakers.map((s) => s.identity));
+        const localIdentity = room?.localParticipant.identity;
+        if (localIdentity) {
+          setIsLocalSpeaking(!isMicMuted() && speakingSet.has(localIdentity));
+        }
         setParticipants((prev) =>
           prev.map((p) => ({
             ...p,
-            isSpeaking: speakingSet.has(p.identity),
+            isSpeaking: !p.isMuted && speakingSet.has(p.identity),
           })),
         );
       });
@@ -233,14 +267,28 @@ export const App: Component = () => {
       // Conexão LiveKit com autoSubscribe: false
       await room.connect(url, token, { autoSubscribe: false });
 
+      room.localParticipant.on(
+        ParticipantEvent.IsSpeakingChanged,
+        (speaking: boolean) => {
+          setIsLocalSpeaking(!isMicMuted() && speaking);
+        },
+      );
+
       // Publica track de microfone calibrado
-      await room.localParticipant.publishTrack(processedAudioTrack, {
-        source: Track.Source.Microphone,
-      });
+      const localMicPub = await room.localParticipant.publishTrack(
+        processedAudioTrack,
+        {
+          source: Track.Source.Microphone,
+        },
+      );
+      if (isMicMuted()) {
+        processedAudioTrack.enabled = false;
+        await localMicPub.mute();
+      }
 
       // Popula participantes já presentes
       room.remoteParticipants.forEach((p) => {
-        addParticipantToList(p);
+        syncParticipantState(p);
         p.trackPublications.forEach((pub) => {
           if (pub.source === Track.Source.Microphone) {
             void pub.setSubscribed(true);
@@ -252,36 +300,11 @@ export const App: Component = () => {
 
       setInCall(true);
     } catch (err) {
-      console.warn("Aviso LiveKit:", err);
-      // Fallback gracioso em ambiente de desenvolvimento/preview
-      setInCall(true);
-      playJoinSound();
-      setParticipants([
-        {
-          identity: "galecalol",
-          displayName: "Gale Calol",
-          avatarColor: "#57F287",
-          isSpeaking: false,
-          isMuted: false,
-          isScreenSharing: true,
-        },
-        {
-          identity: "penumbra",
-          displayName: "Penumbra",
-          avatarColor: "#EB459E",
-          isSpeaking: false,
-          isMuted: true,
-          isScreenSharing: false,
-        },
-        {
-          identity: "vgeralt",
-          displayName: "Geralt",
-          avatarColor: "#FEE75C",
-          isSpeaking: false,
-          isMuted: false,
-          isScreenSharing: false,
-        },
-      ]);
+      console.error("Erro ao conectar ao LiveKit:", err);
+      micProcessor?.cleanup();
+      micProcessor = null;
+      room?.disconnect();
+      room = null;
     } finally {
       setConnecting(false);
     }
@@ -296,30 +319,37 @@ export const App: Component = () => {
     micProcessor = null;
     room = null;
     setInCall(false);
+    setIsLocalSpeaking(false);
     setIsScreenSharing(false);
     setParticipants([]);
   };
 
-  const addParticipantToList = (p: RemoteParticipant) => {
-    const isScreen = Array.from(p.trackPublications.values()).some(
+  const syncParticipantState = (p: RemoteParticipant) => {
+    const pubs = Array.from(p.trackPublications.values());
+    const micPub = pubs.find((pub) => pub.source === Track.Source.Microphone);
+    const screenPub = pubs.find(
       (pub) => pub.source === Track.Source.ScreenShare,
     );
-    const screenPub = Array.from(p.trackPublications.values()).find(
-      (pub) => pub.source === Track.Source.ScreenShare,
-    );
+    const isMuted = micPub ? micPub.isMuted : false;
 
-    setParticipants((prev) => [
-      ...prev.filter((item) => item.identity !== p.identity),
-      {
+    setParticipants((prev) => {
+      const existing = prev.find((item) => item.identity === p.identity);
+      const nextState: ParticipantState = {
         identity: p.identity,
         displayName: p.name || p.identity,
-        avatarColor: "#5865F2",
-        isSpeaking: p.isSpeaking,
-        isMuted: !p.isMicrophoneEnabled,
-        isScreenSharing: isScreen,
+        avatarColor: existing?.avatarColor || "#5865F2",
+        isSpeaking: !isMuted && p.isSpeaking,
+        isMuted,
+        isScreenSharing: Boolean(screenPub),
         screenPublication: screenPub,
-      },
-    ]);
+      };
+      if (existing) {
+        return prev.map((item) =>
+          item.identity === p.identity ? nextState : item,
+        );
+      }
+      return [...prev, nextState];
+    });
   };
 
   const removeParticipantFromList = (identity: string) => {
@@ -342,34 +372,43 @@ export const App: Component = () => {
 
   // Mute / Unmute
   const toggleMute = async () => {
-    if (!room) return;
     const next = !isMicMuted();
-    await room.localParticipant.setMicrophoneEnabled(!next);
     setIsMicMuted(next);
-    if (next) playMute();
-    else playUnmute();
+    if (next) {
+      setIsLocalSpeaking(false);
+      playMute();
+    } else {
+      playUnmute();
+    }
+
+    const processedTrack = micProcessor?.getProcessedTrack();
+    if (processedTrack) {
+      processedTrack.enabled = !next;
+    }
+
+    if (room) {
+      const micPub = room.localParticipant.getTrackPublication(
+        Track.Source.Microphone,
+      );
+      if (micPub) {
+        if (next) {
+          await micPub.mute();
+        } else {
+          await micPub.unmute();
+        }
+      }
+    }
   };
 
   // Deafen / Undeafen
   const toggleDeafen = () => {
     const next = !isDeafened();
     setIsDeafened(next);
+    audioEngine.setDeafened(next);
     if (next) {
       playDeafen();
-      // Silencia todo áudio do AudioEngine
-      participants().forEach((p) => {
-        audioEngine.setVolume(p.identity, "voice", 0);
-        audioEngine.setVolume(p.identity, "screen", 0);
-      });
     } else {
       playUndeafen();
-      // Restaura volumes salvos
-      participants().forEach((p) => {
-        const v = audioEngine.getVolume(p.identity, "voice");
-        const s = audioEngine.getVolume(p.identity, "screen");
-        audioEngine.setVolume(p.identity, "voice", v);
-        audioEngine.setVolume(p.identity, "screen", s);
-      });
     }
   };
 
@@ -646,7 +685,7 @@ export const App: Component = () => {
                 {/* Usuário Local */}
                 <div
                   class={`participant-row local ${
-                    !isMicMuted() ? "speaking-active" : ""
+                    isLocalSpeaking() && !isMicMuted() ? "speaking-active" : ""
                   }`}
                 >
                   <div
@@ -861,7 +900,7 @@ export const App: Component = () => {
                       {/* Card do Usuário Local */}
                       <div
                         class={`stage-user-card ${
-                          !isMicMuted() ? "speaking" : ""
+                          isLocalSpeaking() && !isMicMuted() ? "speaking" : ""
                         }`}
                       >
                         <div
