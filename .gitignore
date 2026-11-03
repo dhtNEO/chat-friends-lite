@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+**/target/
+**/node_modules/
+frontend/dist/
+*.db
+*.db-shm
+*.db-wal
+*.log
+.terraform/
+*.tfstate*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+*.tsbuildinfo

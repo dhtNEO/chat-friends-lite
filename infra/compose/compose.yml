@@ -1,0 +1,61 @@
+services:
+  caddy:
+    image: ${REGISTRY_PREFIX}/caddy:latest
+    container_name: chat-friends-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      - DOMAIN=${DOMAIN}
+      - DUCKDNS_TOKEN=${DUCKDNS_TOKEN}
+    volumes:
+      - ./Caddyfile.duckdns:/etc/caddy/Caddyfile:ro
+      - /opt/chat-friends/data/caddy:/data
+    depends_on:
+      - app
+      - livekit
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  app:
+    image: ${REGISTRY_PREFIX}/app:latest
+    container_name: chat-friends-app
+    restart: unless-stopped
+    environment:
+      - PORT=8080
+      - DATABASE_URL=sqlite:///data/chatfriends.db?mode=rwc
+      - STATIC_DIR=/app/static
+      - SERVER_INVITE_CODE=${SERVER_INVITE_CODE}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+      - LIVEKIT_URL=wss://${DOMAIN}/rtc
+      - DUCKDNS_DOMAIN=${DOMAIN}
+      - DUCKDNS_TOKEN=${DUCKDNS_TOKEN}
+    volumes:
+      - /opt/chat-friends/data/sqlite:/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  livekit:
+    image: livekit/livekit-server:v1.10
+    container_name: chat-friends-livekit
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    ports:
+      - "7881:7881"
+      - "50000-50100:50000-50100/udp"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

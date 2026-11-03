@@ -1,0 +1,14 @@
+project_id          = "seu-projeto-gcp-12345"
+region              = "southamerica-east1"
+zone                = "southamerica-east1-a"
+name                = "chat-friends"
+machine_type        = "e2-small"
+boot_disk_size_gb   = 20
+ssh_diagnostic_cidr = "35.235.240.0/20"
+domain              = "amigos.duckdns.org"
+
+labels = {
+  application = "chat-friends"
+  environment = "production"
+  version     = "v2"
+}

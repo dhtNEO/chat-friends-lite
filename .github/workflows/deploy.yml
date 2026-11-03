@@ -1,0 +1,77 @@
+name: Build and Deploy to GCP
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GAR_LOCATION: southamerica-east1
+  REPOSITORY: chat-friends
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+  WIF_SERVICE_ACCOUNT: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
+
+jobs:
+  build-and-push:
+    name: Build & Push Images to Artifact Registry
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev --quiet
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Define Image Tags
+        id: meta
+        run: |
+          PREFIX="${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}"
+          echo "APP_IMAGE=${PREFIX}/app" >> "$GITHUB_ENV"
+          echo "CADDY_IMAGE=${PREFIX}/caddy" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Build & Push App Image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.APP_IMAGE }}:latest
+            ${{ env.APP_IMAGE }}:${{ env.SHORT_SHA }}
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,mode=max,scope=app
+
+      - name: Build & Push Caddy Image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./infra/caddy
+          file: ./infra/caddy/Dockerfile
+          push: true
+          tags: |
+            ${{ env.CADDY_IMAGE }}:latest
+            ${{ env.CADDY_IMAGE }}:${{ env.SHORT_SHA }}
+          cache-from: type=gha,scope=caddy
+          cache-to: type=gha,mode=max,scope=caddy

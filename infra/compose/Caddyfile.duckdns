@@ -1,0 +1,27 @@
+{
+    # Global options
+}
+
+{$DOMAIN} {
+    tls {
+        dns duckdns {env.DUCKDNS_TOKEN}
+    }
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    # WebRTC SFU signaling (LiveKit)
+    handle /rtc* {
+        reverse_proxy livekit:7880
+    }
+
+    # Application Backend (Rust Axum API + WebSocket + SolidJS SPA)
+    handle {
+        reverse_proxy app:8080
+    }
+}
